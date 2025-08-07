@@ -12,12 +12,17 @@ logger = get_logger(__name__)
 
 def init_session_state():
     """Inicializa todas as variáveis do session_state"""
+    
+    # Verificar se é horário de trading ativo (6h às 22h)
+    current_hour = datetime.now().hour
+    auto_trading_hours = 6 <= current_hour <= 22
+    
     defaults = {
         # Estados básicos
         'predictions': [],
         'decision': False,
-        'running': False,
-        'auto_mode_active': False,
+        'running': auto_trading_hours,  # ✅ Ativo durante horário de trading
+        'auto_mode_active': auto_trading_hours,  # ✅ AUTO-ATIVA pela manhã!
         
         # Dados de trading
         'selected_symbol': 'BTC/USDT',
@@ -68,7 +73,9 @@ def init_session_state():
         if key not in st.session_state:
             st.session_state[key] = value
     
-    logger.info("Session state inicializado")
+    # Log de inicialização
+    logger.info(f"Session state inicializado - Auto mode: {auto_trading_hours} (Hora atual: {current_hour})")
+
 
 def reset_daily_counters():
     """Reset automático dos contadores diários"""
