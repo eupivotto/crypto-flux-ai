@@ -23,26 +23,31 @@ class PositionManager:
     def create_position(self, symbol: str, amount: float, entry_price: float, mode: str = 'Simulado') -> Optional[Position]:
         """Cria uma nova posição"""
         try:
+            # Se o dashboard definiu quantidade, usa a da UI
+            ui_amount = st.session_state.get('ui_trade_amount')
+            if ui_amount and ui_amount > 0:
+                amount = float(ui_amount)
+
             position = Position(symbol, entry_price, amount, mode)
-            
-            # Executar ordem de compra com checagem de notional
+
+            # Executar ordem de compra
             if mode == 'Testnet':
                 success = self._execute_buy_order(position)
                 if not success:
                     return None
             else:
                 logger.info(f"Ordem simulada: {symbol} @ ${entry_price:.2f}")
-            
+
             # Adicionar às posições abertas
             if 'open_positions' not in st.session_state:
                 st.session_state.open_positions = []
-            
-            # NOVO: Inicializa campos P&L flutuante
+
+            # Inicializa campos de P&L flutuante
             pos_dict = position.to_dict()
             pos_dict['max_unrealized_pnl'] = 0.0
             pos_dict['min_unrealized_pnl'] = 0.0
             st.session_state.open_positions.append(pos_dict)
-            
+
             if 'position_counter' not in st.session_state:
                 st.session_state.position_counter = 0
             st.session_state.position_counter += 1
@@ -60,17 +65,35 @@ class PositionManager:
             # Checagem dinâmica do notional mínimo da exchange
             try:
                 info = exchange.fetch_market(position.symbol)
-                min_notional = info['limits']['cost']['min'] if info['limits']['cost'] and info['limits']['cost']['min'] else 10
+                min_notional = (
+                    info.get('limits', {})
+                        .get('cost', {})
+                        .get('min', 10.0)
+                ) or 10.0
             except Exception:
-                min_notional = 10 # fallback seguro
+                min_notional = 10.0  # fallback seguro
 
             notional = position.amount * position.entry_price
             if notional < min_notional:
-                msg = (f"Ordem NÃO enviada: valor ${notional:.2f} abaixo do mínimo exigido (${min_notional:.2f}) "
-                       f"para {position.symbol}. Ajuste a quantidade para operar.")
-                logger.error(msg)
-                st.error(msg)
-                return False
+                # Tentar ajuste automático se habilitado
+                auto_adjust = st.session_state.get('auto_adjust_min_qty', True)
+
+                if auto_adjust and position.entry_price and position.entry_price > 0:
+                    adjusted_amount = round((min_notional / position.entry_price) * 1.05, 6)  # 5% folga
+                    msg_adj = (f"Quantidade ajustada automaticamente de {position.amount} para {adjusted_amount} "
+                               f"({position.symbol}) para cumprir min notional ${min_notional:.2f}.")
+                    logger.warning(msg_adj)
+                    st.warning(msg_adj)
+                    position.amount = adjusted_amount
+                    notional = position.amount * position.entry_price
+
+                # Se ainda estiver abaixo, aborta
+                if notional < min_notional:
+                    msg = (f"Ordem NÃO enviada: valor ${notional:.2f} abaixo do mínimo exigido "
+                           f"(${min_notional:.2f}) para {position.symbol}. Ajuste a quantidade para operar.")
+                    logger.error(msg)
+                    st.error(msg)
+                    return False
 
             buy_order = exchange.create_market_buy_order(position.symbol, position.amount)
             position.buy_order_id = buy_order['id']
@@ -86,13 +109,14 @@ class PositionManager:
         """Monitora todas as posições abertas"""
         if not getattr(st.session_state, 'auto_sell_enabled', True):
             return
-        
+
         if 'open_positions' not in st.session_state:
             st.session_state.open_positions = []
             return
-        
+
         try:
             positions_to_close = []
+
             for pos_dict in st.session_state.open_positions:
                 if pos_dict['status'] != 'OPEN':
                     continue
@@ -124,18 +148,22 @@ class PositionManager:
                     positions_to_close.append(position_id)
                     continue
 
-                # Verificação de saída por tempo (escapando de travas)
+                # Verificar saída por tempo (ex: 15 min máximo para scalping, com lucro mínimo)
                 entry_time = datetime.fromisoformat(pos_dict['entry_time'])
                 duration_minutes = (datetime.now() - entry_time).total_seconds() / 60
+
                 if duration_minutes > 15:
                     pnl_percent = (current_price - entry_price) / entry_price
-                    if pnl_percent > 0.001:
+                    if pnl_percent > 0.001:  # 0.1% de lucro mínimo
                         self.close_position(position_id, current_price, 'TIME_EXIT')
                         positions_to_close.append(position_id)
 
+            # Atualizar timestamp do último check
             st.session_state.last_position_check = time.time()
+
             if positions_to_close:
                 logger.info(f"{len(positions_to_close)} posições fechadas automaticamente")
+
         except Exception as e:
             logger.error(f"Erro no monitoramento: {e}")
 
@@ -145,11 +173,13 @@ class PositionManager:
             # Encontrar a posição
             position_dict = None
             position_index = None
+
             for i, pos in enumerate(st.session_state.open_positions):
                 if pos['id'] == position_id:
                     position_dict = pos
                     position_index = i
                     break
+
             if not position_dict:
                 logger.error(f"Posição {position_id} não encontrada")
                 return False
@@ -177,6 +207,8 @@ class PositionManager:
                 'pnl_usd': pnl_usd,
                 'pnl_brl': pnl_brl
             })
+
+            # Mover para posições fechadas
             if 'closed_positions' not in st.session_state:
                 st.session_state.closed_positions = []
             st.session_state.closed_positions.append(position_dict)
@@ -187,6 +219,7 @@ class PositionManager:
                 st.session_state.daily_profit_usd = 0.0
             if 'daily_profit' not in st.session_state:
                 st.session_state.daily_profit = 0.0
+
             st.session_state.daily_profit_usd += pnl_usd
             st.session_state.daily_profit += pnl_brl
 
@@ -207,8 +240,10 @@ class PositionManager:
                 'position_id': position_id,
                 'duration_minutes': (datetime.now() - datetime.fromisoformat(position_dict['entry_time'])).total_seconds() / 60,
                 'max_unrealized_pnl': position_dict.get('max_unrealized_pnl', 0.0),
-                'min_unrealized_pnl': position_dict.get('min_unrealized_pnl', 0.0)
+                'min_unrealized_pnl': position_dict.get('min_unrealized_pnl', 0.0),
+                'saved_at': datetime.now().isoformat()
             }
+
             if 'trade_history' not in st.session_state:
                 st.session_state.trade_history = []
             st.session_state.trade_history.append(trade_record)
@@ -227,13 +262,15 @@ class PositionManager:
         """Executa ordem de venda real"""
         try:
             sell_order = exchange.create_market_sell_order(
-                position_dict['symbol'], 
+                position_dict['symbol'],
                 position_dict['amount']
             )
             exit_price = sell_order.get('average', exit_price)
             position_dict['sell_order_id'] = sell_order['id']
+
             logger.info(f"Venda real executada: {sell_order['id'][:8]}")
             return True
+
         except Exception as e:
             logger.error(f"Erro na venda real: {e}")
             return False
@@ -242,7 +279,11 @@ class PositionManager:
         """Obtém preço atual de um símbolo"""
         try:
             ticker = exchange.fetch_ticker(symbol)
-            return ticker['last']
+            price = ticker['last']
+            if price:
+                # Opcional: manter última cotação em sessão para a UI
+                st.session_state['last_price_for_symbol'] = price
+            return price
         except Exception as e:
             logger.error(f"Erro ao obter preço de {symbol}: {e}")
             return None
@@ -251,18 +292,22 @@ class PositionManager:
         """Retorna número de posições abertas"""
         if 'open_positions' not in st.session_state:
             return 0
-        return len([pos for pos in st.session_state.open_positions if pos['status'] == 'OPEN'])
+        return len([pos for pos in st.session_state.open_positions if pos.get('status', 'OPEN') == 'OPEN'])
 
     def get_unrealized_pnl(self) -> float:
         """Calcula P&L não realizado de todas as posições abertas"""
         if 'open_positions' not in st.session_state:
             return 0.0
+
         total_pnl = 0.0
+
         for pos in st.session_state.open_positions:
-            if pos['status'] != 'OPEN':
+            if pos.get('status', 'OPEN') != 'OPEN':
                 continue
+
             current_price = self.get_current_price(pos['symbol'])
             if current_price:
                 pnl = (current_price - pos['entry_price']) * pos['amount']
                 total_pnl += pnl
+
         return total_pnl

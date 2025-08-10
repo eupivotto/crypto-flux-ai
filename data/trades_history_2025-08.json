@@ -254,5 +254,43 @@
     "max_unrealized_pnl": 0.00018000000000029104,
     "min_unrealized_pnl": -0.0035599999999999456,
     "saved_at": "2025-08-08T00:21:03.813759"
+  },
+  {
+    "id": 1,
+    "timestamp_str": "23:17:04",
+    "trade_type": "COMPLETE_CYCLE",
+    "symbol": "ETH/USDT",
+    "entry_price": 4236.8,
+    "exit_price": 4244.7,
+    "amount": 0.002478,
+    "profit_usd": 0.0195761999999991,
+    "profit_brl": 0.10766909999999505,
+    "status": "completed",
+    "mode": "Testnet",
+    "exit_reason": "MANUAL_CLOSE",
+    "position_id": "POS_1754795623_6782",
+    "duration_minutes": 3.3543510833333334,
+    "max_unrealized_pnl": 0.025077359999999733,
+    "min_unrealized_pnl": -2.4780000000540895e-05,
+    "saved_at": "2025-08-09T23:17:04.790877"
+  },
+  {
+    "id": 1,
+    "timestamp_str": "00:05:41",
+    "trade_type": "COMPLETE_CYCLE",
+    "symbol": "ETH/USDT",
+    "entry_price": 4236.33,
+    "exit_price": 4233.18,
+    "amount": 0.002478,
+    "profit_usd": -0.007805699999999099,
+    "profit_brl": -0.042931349999995046,
+    "status": "completed",
+    "mode": "Testnet",
+    "exit_reason": "STOP_LOSS",
+    "position_id": "POS_1754798654_9164",
+    "duration_minutes": 1.4462557333333335,
+    "max_unrealized_pnl": 0.0032957399999998197,
+    "min_unrealized_pnl": -0.007805699999999099,
+    "saved_at": "2025-08-10T00:05:41.585162"
   }
 ]

@@ -1,9 +1,9 @@
 """
 Modelos de dados para o sistema de trading
 """
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 import random
 import time
 
@@ -69,8 +69,25 @@ class TradeSignal:
     volume_score: float
     momentum_score: float
     risk_score: float
+    # NOVOS CAMPOS ADICIONADOS para compatibilidade com SignalGenerator atualizado
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    additional_data: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Validações pós-inicialização"""
+        if self.confidence < 0.0 or self.confidence > 1.0:
+            raise ValueError("Confidence deve estar entre 0.0 e 1.0")
+        
+        if self.action not in ['BUY', 'SELL', 'HOLD']:
+            raise ValueError("Action deve ser 'BUY', 'SELL' ou 'HOLD'")
     
     def to_dict(self):
+        """Converte para dicionário para serialização"""
         data = asdict(self)
         data['timestamp'] = self.timestamp.isoformat()
         return data
+
+# Alias para compatibilidade com código que pode usar o nome antigo
+TradingSignal = TradeSignal

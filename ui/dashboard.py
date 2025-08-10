@@ -12,9 +12,9 @@ from typing import Dict, List, Optional
 from config.settings import config
 from core.accounts import get_testnet_balance
 from utils.logger import get_logger
+from config.exchange_config import exchange
 
 logger = get_logger(__name__)
-
 
 class TradingDashboard:
     """Dashboard principal do sistema de trading"""
@@ -28,12 +28,47 @@ class TradingDashboard:
 
         col1, col2, col3, col4 = st.columns(4)
 
+        # Em display_main_controls, adicione:
+        with st.sidebar:
+            strategy_mode = st.selectbox(
+                "🎯 Estratégia Ativa",
+                ["Scalper (Volume/Candle)", "Bollinger+RSI+Vol", "Ambas"],
+                index=0,
+                help="Escolha a estratégia principal do bot"
+            )
+            st.session_state['strategy_mode'] = strategy_mode
+            
+            if strategy_mode != "Scalper (Volume/Candle)":
+                st.sidebar.write("**⚙️ Configurações Bollinger+RSI**")
+                
+                bb_period = st.sidebar.slider("Período Bollinger", 10, 30, 20)
+                bb_std = st.sidebar.slider("Desvio Padrão", 1.5, 3.0, 2.0, 0.1)
+                rsi_period = st.sidebar.slider("Período RSI", 10, 20, 14)
+                min_volatility = st.sidebar.slider("Volatilidade Mínima (%)", 0.1, 2.0, 0.5, 0.1) / 100
+                
+                # Salvar configurações
+                st.session_state.update({
+                    'bb_period': bb_period,
+                    'bb_std': bb_std, 
+                    'rsi_period': rsi_period,
+                    'min_volatility': min_volatility
+                })
+
+
         with col1:
-            # Seleção de moeda
+            # Seleção de moeda com fallback seguro
+            coins = getattr(config, 'AVAILABLE_COINS', ['BTC/USDT'])
+            if not coins or not isinstance(coins, list):
+                coins = ['BTC/USDT']
+            
+            selected = st.session_state.get('selected_symbol', coins[0])
+            if selected not in coins:
+                selected = coins[0]
+
             current_symbol = st.selectbox(
                 "💱 Moeda Ativa",
-                config.AVAILABLE_COINS,
-                index=config.AVAILABLE_COINS.index(st.session_state.get('selected_symbol', 'BTC/USDT'))
+                coins,
+                index=coins.index(selected)
             )
             if current_symbol != st.session_state.get('selected_symbol'):
                 st.session_state.selected_symbol = current_symbol
@@ -79,6 +114,7 @@ class TradingDashboard:
                 help="Se ativo, ignora análise combinada e opera só com sinais de candle/região/volume."
             )
             st.session_state.scalper_mode = scalper_mode
+        
 
         self._display_system_status()
 
@@ -100,14 +136,17 @@ class TradingDashboard:
 
         with col4:
             remaining_time = max(
-                0, config.MIN_INTERVAL_BETWEEN_TRADES -
-                   (time.time() - st.session_state.get('last_trade_time', 0))
+                0,
+                config.MIN_INTERVAL_BETWEEN_TRADES - (time.time() - st.session_state.get('last_trade_time', 0))
             )
             st.metric("Próximo Trade", f"{int(remaining_time)}s")
 
     def display_trading_controls(self, position_manager, signal_generator):
         """Exibe controles de trading"""
         st.subheader("🚀 Controles de Trading")
+
+        # Disponibiliza o PM para a UI (para pegar preço atual na seção avançada)
+        st.session_state['position_manager'] = position_manager
 
         col1, col2, col3, col4 = st.columns(4)
 
@@ -130,7 +169,6 @@ class TradingDashboard:
                 st.session_state.running = False
                 st.warning("🛑 Sistema pausado")
 
-        # Configurações avançadas
         with st.expander("⚙️ Configurações Avançadas"):
             self._display_advanced_settings()
 
@@ -184,10 +222,31 @@ class TradingDashboard:
                 st.error("❌ Não foi possível obter preço atual")
                 return
 
-            position = position_manager.create_position(symbol, config.TRADE_AMOUNT, current_price, mode)
+            # Salvar último preço em sessão (usado na UI para sugestão)
+            st.session_state['last_price_for_symbol'] = current_price
+
+            # Usar quantidade escolhida na UI, se disponível
+            chosen_amount = st.session_state.get('ui_trade_amount', config.TRADE_AMOUNT)
+
+            # Validação amigável antes do PM (o PM ainda vai checar/ajustar)
+            try:
+                market = exchange.fetch_market(symbol)
+                min_notional = (market.get('limits', {}).get('cost', {}).get('min', 10.0)) or 10.0
+            except Exception:
+                min_notional = 10.0
+
+            notional = chosen_amount * current_price
+            if notional < min_notional:
+                st.warning(
+                    f"A quantidade atual gera ${notional:.2f}, abaixo do mínimo ${min_notional:.2f}. "
+                    f"Ajuste na UI ou ative o autoajuste nas Configurações Avançadas."
+                )
+
+            # Criar posição usando a quantidade do UI
+            position = position_manager.create_position(symbol, chosen_amount, current_price, mode)
 
             if position:
-                st.session_state.today_trades_count += 1
+                st.session_state.today_trades_count = st.session_state.get('today_trades_count', 0) + 1
                 st.session_state.last_trade_time = time.time()
 
                 st.success(f"✅ **TRADE EXECUTADO COM SUCESSO!**")
@@ -209,22 +268,60 @@ class TradingDashboard:
 
         col1, col2 = st.columns(2)
 
+        # Informações do par e sugestão de quantidade mínima
+        symbol = st.session_state.get('selected_symbol', 'BTC/USDT')
+        base_asset = symbol.split('/')[0] if '/' in symbol else symbol
+        min_notional = 10.0
+        current_price = st.session_state.get('last_price_for_symbol', None)
+
+        if current_price is None and 'position_manager' in st.session_state:
+            try:
+                current_price = st.session_state['position_manager'].get_current_price(symbol)
+                if current_price:
+                    st.session_state['last_price_for_symbol'] = current_price
+            except Exception:
+                current_price = None
+
+        try:
+            market = exchange.fetch_market(symbol)
+            min_notional = (market.get('limits', {}).get('cost', {}).get('min', 10.0)) or 10.0
+        except Exception:
+            min_notional = 10.0
+
+        min_qty_sugerida = None
+        if current_price and current_price > 0:
+            min_qty_sugerida = round((min_notional / current_price) * 1.05, 6)  # 5% folga
+
+        info_text = f"Min notional exigido ({symbol}): ${min_notional:.2f}"
+        if current_price:
+            info_text += f" | Preço atual: ${current_price:.6f}"
+        if min_qty_sugerida:
+            info_text += f" | Quantidade mínima sugerida: {min_qty_sugerida} {base_asset}"
+        st.caption(info_text)
+
         with col1:
+            # Define valor padrão: usa sugestão se a config estiver abaixo
+            default_trade_amount = float(config.TRADE_AMOUNT)
+            if min_qty_sugerida:
+                default_trade_amount = max(default_trade_amount, min_qty_sugerida)
+
             trade_amount = st.number_input(
-                "💰 Quantidade por Trade (BTC)",
-                min_value=0.0001,
-                max_value=1.0,
-                value=config.TRADE_AMOUNT,
-                step=0.0001,
-                format="%.4f",
+                f"💰 Quantidade por Trade ({base_asset})",
+                min_value=0.000001,
+                max_value=1000.0,
+                value=float(default_trade_amount),
+                step=0.000001,
+                format="%.6f",
                 key="trade_amount_setting",
-                help="Quantidade de BTC por operação"
+                help=f"Quantidade de {base_asset} por operação"
             )
+            st.session_state['ui_trade_amount'] = float(trade_amount)
+
             take_profit = st.number_input(
                 "📈 Take Profit (%)",
                 min_value=0.01,
                 max_value=5.0,
-                value=config.TAKE_PROFIT_PERCENT * 100,
+                value=float(config.TAKE_PROFIT_PERCENT * 100),
                 step=0.01,
                 format="%.2f",
                 key="take_profit_setting",
@@ -234,18 +331,25 @@ class TradingDashboard:
                 "⏱️ Intervalo Entre Trades (s)",
                 min_value=30,
                 max_value=300,
-                value=max(30, min(300, config.MIN_INTERVAL_BETWEEN_TRADES)),
+                value=int(max(30, min(300, config.MIN_INTERVAL_BETWEEN_TRADES))),
                 step=30,
                 key="interval_setting",
                 help="Tempo mínimo entre operações"
             )
+
+            auto_adjust = st.toggle(
+                "Autoajustar quantidade para cumprir mínimo da corretora",
+                value=st.session_state.get('auto_adjust_min_qty', True),
+                help="Se ativo, o sistema aumenta automaticamente a quantidade para atingir o notional mínimo do par."
+            )
+            st.session_state['auto_adjust_min_qty'] = auto_adjust
 
         with col2:
             stop_loss = st.number_input(
                 "📉 Stop Loss (%)",
                 min_value=0.01,
                 max_value=2.0,
-                value=config.STOP_LOSS_PERCENT * 100,
+                value=float(config.STOP_LOSS_PERCENT * 100),
                 step=0.01,
                 format="%.2f",
                 key="stop_loss_setting",
@@ -255,7 +359,7 @@ class TradingDashboard:
                 "🔄 Máximo de Posições",
                 min_value=1,
                 max_value=15,
-                value=config.MAX_OPEN_POSITIONS,
+                value=int(config.MAX_OPEN_POSITIONS),
                 step=1,
                 key="max_positions_setting",
                 help="Número máximo de posições simultâneas"
@@ -264,12 +368,13 @@ class TradingDashboard:
                 "📊 Máximo Trades/Dia",
                 min_value=10,
                 max_value=200,
-                value=config.MAX_TRADES_PER_DAY,
+                value=int(config.MAX_TRADES_PER_DAY),
                 step=5,
                 key="max_trades_setting",
                 help="Limite diário de operações"
             )
 
+        # Mostrar relação Risk/Reward
         if take_profit > 0 and stop_loss > 0:
             risk_reward = take_profit / stop_loss
             if risk_reward >= 1.5:
@@ -279,9 +384,10 @@ class TradingDashboard:
             else:
                 st.error(f"❌ **Relação R/R: 1:{risk_reward:.1f}** - Risco alto")
 
+        # Estimativa de lucro por trade
         if trade_amount > 0 and take_profit > 0:
-            estimated_btc_price = 45000
-            profit_per_trade = trade_amount * estimated_btc_price * (take_profit / 100)
+            reference_price = current_price if current_price else 45000
+            profit_per_trade = float(trade_amount) * float(reference_price) * (float(take_profit) / 100.0)
             trades_needed = config.DAILY_TARGET_USD / profit_per_trade if profit_per_trade > 0 else 999
             st.info(
                 f"💡 **Estimativa:** ${profit_per_trade:.4f} por trade | "
@@ -348,7 +454,7 @@ class TradingDashboard:
         with col6:
             saldo = get_testnet_balance()
             if saldo is not None:
-                st.metric("💼Saldo Testnet", f"${saldo:.2f}")
+                st.metric("💼 Saldo Testnet", f"${saldo:.2f}")
             else:
                 st.error("Erro ao obter saldo testnet")
 
@@ -382,6 +488,7 @@ class TradingDashboard:
             log_filter = st.selectbox("🔍 Filtrar por:", ["Todos", "Sucessos", "Erros", "Trades"])
 
         with col2:
+            # CORRIGIDO: Lista completa dos logs
             log_count = st.selectbox("📊 Mostrar:", [10, 20, 50], index=0)
 
         with col3:
@@ -425,3 +532,57 @@ class TradingDashboard:
             st.success(log_text)
         else:
             st.error(log_text)
+            
+        # Displays da estrategia de bb
+    def display_bollinger_charts(self, symbol: str = None):
+        """Exibe gráficos da estratégia Bollinger+RSI"""
+        from ui.bollinger_charts import BollingerRSICharts
+        
+        if symbol is None:
+            symbol = st.session_state.get('selected_symbol', 'BTC/USDT')
+        
+        st.subheader(f"📊 Gráficos de Alerta - Estratégia Bollinger+RSI")
+        
+        # Controles do gráfico
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            period = st.selectbox(
+                "📅 Período",
+                [50, 100, 200, 500],
+                index=1,
+                help="Número de candles para análise"
+            )
+        
+        with col2:
+            auto_refresh = st.checkbox(
+                "🔄 Auto Refresh",
+                value=True,
+                help="Atualiza gráfico automaticamente"
+            )
+        
+        with col3:
+            if st.button("🔄 Atualizar Gráfico", use_container_width=True):
+                st.rerun()
+        
+        # Criar e exibir gráfico
+        chart_generator = BollingerRSICharts()
+        
+        # Estatísticas da estratégia
+        with st.expander("📈 Estatísticas da Estratégia (Expandir)", expanded=False):
+            chart_generator.display_strategy_stats(symbol, period)
+        
+        # Gráfico principal
+        with st.spinner(f"Carregando gráfico para {symbol}..."):
+            fig = chart_generator.create_bollinger_rsi_chart(symbol, period)
+            
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.error("❌ Erro ao carregar gráfico. Verifique dados de mercado.")
+        
+        # Auto-refresh
+        if auto_refresh:
+            time.sleep(30)  # Aguarda 30s
+            st.rerun()
+
